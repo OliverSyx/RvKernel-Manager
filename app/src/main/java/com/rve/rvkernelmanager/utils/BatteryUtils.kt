@@ -14,6 +14,10 @@ import android.os.BatteryManager
 import kotlin.math.roundToInt
 import com.topjohnwu.superuser.Shell
 import com.rve.rvkernelmanager.R
+import android.os.SystemClock
+import java.io.BufferedReader
+import java.io.File
+import java.io.FileReader
 
 object BatteryUtils {
 
@@ -25,6 +29,11 @@ object BatteryUtils {
 
     const val TAG = "BatteryUtils"
 
+    private var screenLastOnTime: Long = 0
+    private var screenAccumulatedTime: Long = 0
+    private var screenReceiver: BroadcastReceiver? = null
+    private var isScreenMonitorActive = false
+    
     private fun Context.getBatteryIntent(): Intent? =
         registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
     
@@ -120,4 +129,78 @@ object BatteryUtils {
         registerBatteryListener(context) {
             callback(getBatteryMaximumCapacity())
         }
+
+        fun registerScreenMonitor(context: Context) {
+        if (isScreenMonitorActive) return
+
+        screenReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                when (intent.action) {
+                    Intent.ACTION_SCREEN_ON -> {
+                        screenLastOnTime = SystemClock.elapsedRealtime()
+                    }
+                    Intent.ACTION_SCREEN_OFF -> {
+                        if (screenLastOnTime > 0) {
+                            screenAccumulatedTime += SystemClock.elapsedRealtime() - screenLastOnTime
+                        }
+                    }
+                }
+            }
+        }
+
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+
+        context.applicationContext.registerReceiver(screenReceiver, filter)
+        isScreenMonitorActive = true
+    }
+
+    fun unregisterScreenMonitor(context: Context) {
+        if (isScreenMonitorActive && screenReceiver != null) {
+            try {
+                context.applicationContext.unregisterReceiver(screenReceiver)
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "Screen receiver not registered", e)
+            }
+            screenReceiver = null
+            isScreenMonitorActive = false
+        }
+    }
+
+    fun getScreenOnDuration(): Long = screenAccumulatedTime
+
+    fun resetScreenDuration() {
+        screenAccumulatedTime = 0
+        screenLastOnTime = 0
+    }
+    
+    fun getDeepSleepTimeUs(): Long = runCatching {
+        val deepSleepPath = "/sys/devices/system/cpu/cpu0/cpuidle/state3/time"
+        val file = File(deepSleepPath)
+        if (!file.exists()) {
+            Log.w(TAG, "Deep sleep file not found: $deepSleepPath")
+            return@runCatching -1
+        }
+        
+        BufferedReader(FileReader(file)).use { reader ->
+            reader.readLine()?.trim()?.toLongOrNull() ?: -1
+        }
+    }.getOrElse {
+        Log.e(TAG, "Error reading deep sleep time", it)
+        -1
+    }
+
+    fun showAdvancedBatteryInfo(context: Context) {
+        val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        
+        val chargeCounter = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+        val currentNow = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+        val capacity = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+
+        Log.i(TAG, "ChargeCounter: $chargeCounter µAh")
+        Log.i(TAG, "CurrentNow: $currentNow µA")
+        Log.i(TAG, "Capacity: $capacity %")
+    }
 }
